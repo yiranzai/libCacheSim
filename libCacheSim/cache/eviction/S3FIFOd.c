@@ -1,13 +1,14 @@
 //
 //  Quick demotion + lazy promotion v2
+//  快速降级 + 懒惰提升 策略的第二版实现
 //
-//  FIFO + Clock
-//  the ratio of FIFO is decided dynamically
-//  based on the marginal hits on FIFO-ghost and main cache
-//  we track the hit distribution of FIFO-ghost and main cache
-//  if the hit distribution of FIFO-ghost at pos 0 is larger than
-//  the hit distribution of main cache at pos -1,
-//  we increase FIFO size by 1
+//  FIFO + Clock 组合策略
+//  FIFO区域的比例是动态决定的
+//  基于FIFO-ghost和main cache的边际命中率
+//  我们跟踪FIFO-ghost和main cache的命中分布
+//  如果FIFO-ghost在位置0的命中分布大于
+//  main cache在位置-1的命中分布
+//  我们将FIFO大小增加1
 //
 //
 //  S3FIFOd.c
@@ -24,24 +25,26 @@
 extern "C" {
 #endif
 
+// S3FIFOd算法的参数结构体
 typedef struct {
-  cache_t *fifo;
-  cache_t *fifo_ghost;
-  cache_t *main_cache;
-  bool hit_on_ghost;
-  int move_to_main_threshold;
+  cache_t *fifo;            // FIFO缓存区
+  cache_t *fifo_ghost;      // FIFO的ghost列表，用于记录从FIFO淘汰的对象
+  cache_t *main_cache;      // 主缓存区，可配置为不同类型(Clock、LRU等)
+  bool hit_on_ghost;        // 是否命中ghost列表的标志
+  int move_to_main_threshold; // 对象从FIFO提升到main_cache的访问频率阈值
 
-  double fifo_size_ratio;
-  char main_cache_type[32];
+  double fifo_size_ratio;   // FIFO区域占总缓存的比例
+  char main_cache_type[32]; // 主缓存的类型名称
 
-  cache_t *fifo_eviction;
-  cache_t *main_cache_eviction;
-  int32_t fifo_eviction_hit;
-  int32_t main_eviction_hit;
+  cache_t *fifo_eviction;      // 跟踪从FIFO淘汰的对象
+  cache_t *main_cache_eviction; // 跟踪从main_cache淘汰的对象
+  int32_t fifo_eviction_hit;    // FIFO淘汰对象的命中次数
+  int32_t main_eviction_hit;    // main缓存淘汰对象的命中次数
 
-  request_t *req_local;
+  request_t *req_local;     // 本地请求对象，用于临时存储
 } S3FIFOd_params_t;
 
+// 默认的缓存参数设置
 static const char *DEFAULT_CACHE_PARAMS =
     "fifo-size-ratio=0.10,main-cache=Clock2,move-to-main-threshold=1";
 
@@ -73,9 +76,18 @@ static void S3FIFOd_parse_params(cache_t *cache,
 // ****                                                               ****
 // ***********************************************************************
 
+/**
+ * @brief 初始化S3FIFOd缓存，分配资源并设置参数
+ * 
+ * @param ccache_params 通用缓存参数
+ * @param cache_specific_params 特定缓存参数
+ * @return 初始化好的缓存实例
+ */
 cache_t *S3FIFOd_init(const common_cache_params_t ccache_params,
                      const char *cache_specific_params) {
+  // 初始化基本缓存结构
   cache_t *cache = cache_struct_init("S3FIFOd", ccache_params, cache_specific_params);
+  // 注册缓存操作函数
   cache->cache_init = S3FIFOd_init;
   cache->cache_free = S3FIFOd_free;
   cache->get = S3FIFOd_get;
@@ -90,30 +102,36 @@ cache_t *S3FIFOd_init(const common_cache_params_t ccache_params,
 
   cache->obj_md_size = 0;
 
+  // 分配参数结构体内存
   cache->eviction_params = malloc(sizeof(S3FIFOd_params_t));
   memset(cache->eviction_params, 0, sizeof(S3FIFOd_params_t));
   S3FIFOd_params_t *params = (S3FIFOd_params_t *)cache->eviction_params;
   params->req_local = new_request();
   params->hit_on_ghost = false;
 
+  // 解析缓存参数
   S3FIFOd_parse_params(cache, DEFAULT_CACHE_PARAMS);
   if (cache_specific_params != NULL) {
     S3FIFOd_parse_params(cache, cache_specific_params);
   }
 
+  // 计算各个缓存区域的大小
   int64_t fifo_cache_size =
       (int64_t)ccache_params.cache_size * params->fifo_size_ratio;
   int64_t main_cache_size = ccache_params.cache_size - fifo_cache_size;
   int64_t fifo_ghost_cache_size = main_cache_size;
 
+  // 初始化FIFO缓存区
   common_cache_params_t ccache_params_local = ccache_params;
   ccache_params_local.cache_size = fifo_cache_size;
   params->fifo = FIFO_init(ccache_params_local, NULL);
 
+  // 初始化FIFO ghost缓存区
   ccache_params_local.cache_size = fifo_ghost_cache_size;
   params->fifo_ghost = FIFO_init(ccache_params_local, NULL);
   snprintf(params->fifo_ghost->cache_name, CACHE_NAME_ARRAY_LEN, "FIFO-ghost");
 
+  // 初始化main缓存区，支持多种缓存算法
   ccache_params_local.cache_size = main_cache_size;
   if (strcasecmp(params->main_cache_type, "FIFO") == 0) {
     params->main_cache = FIFO_init(ccache_params_local, NULL);
@@ -145,6 +163,7 @@ cache_t *S3FIFOd_init(const common_cache_params_t ccache_params,
     ERROR("S3FIFOd does not support %s \n", params->main_cache_type);
   }
 
+  // 初始化跟踪淘汰对象的缓存
   ccache_params_local.cache_size = ccache_params.cache_size / 10;
   ccache_params_local.hashpower -= 4;
   params->fifo_eviction = FIFO_init(ccache_params_local, NULL);
@@ -162,6 +181,7 @@ cache_t *S3FIFOd_init(const common_cache_params_t ccache_params,
   params->main_cache_eviction->track_eviction_age = false;
 #endif
 
+  // 设置缓存名称
   snprintf(cache->cache_name, CACHE_NAME_ARRAY_LEN, "S3FIFOd-%s-%d",
            params->main_cache_type, params->move_to_main_threshold);
 
@@ -169,9 +189,9 @@ cache_t *S3FIFOd_init(const common_cache_params_t ccache_params,
 }
 
 /**
- * free resources used by this cache
+ * 释放缓存占用的资源
  *
- * @param cache
+ * @param cache 要释放的缓存实例
  */
 static void S3FIFOd_free(cache_t *cache) {
   S3FIFOd_params_t *params = (S3FIFOd_params_t *)cache->eviction_params;
@@ -183,41 +203,63 @@ static void S3FIFOd_free(cache_t *cache) {
   cache_struct_free(cache);
 }
 
+/**
+ * @brief 动态更新FIFO缓存大小的函数
+ * 基于FIFO淘汰对象和main缓存淘汰对象的命中情况调整大小比例
+ * 
+ * @param cache 缓存实例
+ * @param req 请求对象
+ */
 static void S3FIFOd_update_fifo_size(cache_t *cache, const request_t *req) {
   S3FIFOd_params_t *params = (S3FIFOd_params_t *)cache->eviction_params;
 
+  // 计算调整步长，最小为1，最大为两个缓存中较小者的1/1000
   int step = 20;
   step = MAX(
       1, MIN(params->fifo->cache_size, params->main_cache->cache_size) / 1000);
+  
+  // 检查是否满足调整条件
   bool cond1 = params->fifo_eviction_hit + params->main_eviction_hit > 100;
   bool cond2 = params->main_cache_eviction->get_occupied_byte(
                    params->main_cache_eviction) > 0;
+  
+  // 如果跟踪淘汰对象的缓存为空，重置命中计数
   if (!cond2) {
     params->fifo_eviction_hit = 0;
     params->main_eviction_hit = 0;
   }
 
+  // 根据命中情况调整缓存大小
   if (cond1 && cond2) {
     if (params->fifo_eviction_hit > params->main_eviction_hit * 2) {
-      // if (params->main_cache->cache_size > step) {
+      // 如果FIFO淘汰对象的命中率高，增加FIFO大小
       if (params->main_cache->cache_size > cache->cache_size / 100) {
         params->fifo->cache_size += step;
         params->fifo_ghost->cache_size += step;
         params->main_cache->cache_size -= step;
       }
     } else if (params->main_eviction_hit > params->fifo_eviction_hit * 2) {
-      // if (params->fifo->cache_size > step) {
+      // 如果main缓存淘汰对象的命中率高，减小FIFO大小
       if (params->fifo->cache_size > cache->cache_size / 100) {
         params->fifo->cache_size -= step;
         params->fifo_ghost->cache_size -= step;
         params->main_cache->cache_size += step;
       }
     }
+    
+    // 衰减命中计数，避免历史数据影响过大
     params->fifo_eviction_hit = params->fifo_eviction_hit * 0.8;
     params->main_eviction_hit = params->main_eviction_hit * 0.8;
   }
 }
 
+/**
+ * @brief 另一种动态更新FIFO缓存大小的函数(代码中未使用)
+ * 每次只调整1个单位的大小
+ * 
+ * @param cache 缓存实例
+ * @param req 请求对象
+ */
 static void S3FIFOd_update_fifo_size2(cache_t *cache, const request_t *req) {
   S3FIFOd_params_t *params = (S3FIFOd_params_t *)cache->eviction_params;
 
@@ -234,23 +276,14 @@ static void S3FIFOd_update_fifo_size2(cache_t *cache, const request_t *req) {
 }
 
 /**
- * @brief this function is the user facing API
- * it performs the following logic
- *
- * ```
- * if obj in cache:
- *    update_metadata
- *    return true
- * else:
- *    if cache does not have enough space:
- *        evict until it has space to insert
- *    insert the object
- *    return false
- * ```
- *
- * @param cache
- * @param req
- * @return true if cache hit, false if cache miss
+ * @brief 处理缓存请求的用户接口函数
+ * 执行逻辑：
+ * 1. 先动态调整FIFO和main_cache的大小比例
+ * 2. 处理请求(查找/插入)
+ * 
+ * @param cache 缓存实例
+ * @param req 请求对象
+ * @return 命中返回true，未命中返回false
  */
 static bool S3FIFOd_get(cache_t *cache, const request_t *req) {
   S3FIFOd_params_t *params = (S3FIFOd_params_t *)cache->eviction_params;
@@ -258,23 +291,10 @@ static bool S3FIFOd_get(cache_t *cache, const request_t *req) {
                    params->main_cache->get_occupied_byte(params->main_cache) <=
                cache->cache_size);
 
-  // static __thread int64_t last_print_rtime = 0;
-  // if (req->clock_time - last_print_rtime >= 24 * 3600) {
-  //   printf(
-  //       "%ld %ld day: evictHit %d %d, fifo size %ld/%ld main size %ld/%ld, ghost "
-  //       "size %ld/%ld\n",
-  //       cache->n_req, req->clock_time / 86400, params->fifo_eviction_hit,
-  //       params->main_eviction_hit,
-  //       params->fifo->get_occupied_byte(params->fifo), params->fifo->cache_size,
-  //       params->main_cache->get_occupied_byte(params->main_cache),
-  //       params->main_cache->cache_size,
-  //       params->fifo_ghost->get_occupied_byte(params->fifo_ghost),
-  //       params->fifo_ghost->cache_size);
-  //   last_print_rtime = req->clock_time;
-  // }
-
+  // 动态调整FIFO和main_cache的大小
   S3FIFOd_update_fifo_size(cache, req);
 
+  // 处理请求
   bool cache_hit = cache_get_base(cache, req);
   return cache_hit;
 }
@@ -285,20 +305,20 @@ static bool S3FIFOd_get(cache_t *cache, const request_t *req) {
 // ****                                                               ****
 // ***********************************************************************
 /**
- * @brief find an object in the cache
+ * @brief 在缓存中查找对象
  *
- * @param cache
- * @param req
- * @param update_cache whether to update the cache,
- *  if true, the object is promoted
- *  and if the object is expired, it is removed from the cache
- * @return the object or NULL if not found
+ * @param cache 缓存实例
+ * @param req 请求对象
+ * @param update_cache 是否更新缓存元数据
+ *  为true时，会更新对象的访问状态
+ *  如果对象已过期，会从缓存中移除
+ * @return 找到的对象指针，未找到返回NULL
  */
 static cache_obj_t *S3FIFOd_find(cache_t *cache, const request_t *req,
                                 const bool update_cache) {
   S3FIFOd_params_t *params = (S3FIFOd_params_t *)cache->eviction_params;
 
-  // if update cache is false, we only check the fifo and main caches
+  // 如果不需要更新缓存，只检查对象是否存在
   if (!update_cache) {
     cache_obj_t *obj = params->fifo->find(params->fifo, req, false);
     if (obj != NULL) {
@@ -311,19 +331,23 @@ static cache_obj_t *S3FIFOd_find(cache_t *cache, const request_t *req,
     return NULL;
   }
 
-  /* update cache is true from now */
+  /* 从这里开始需要更新缓存 */
   params->hit_on_ghost = false;
+  // 先在FIFO缓存中查找
   cache_obj_t *obj = params->fifo->find(params->fifo, req, true);
   if (obj != NULL) {
     return obj;
   }
 
+  // 检查ghost列表中是否存在该对象
   if (params->fifo_ghost->remove(params->fifo_ghost, req->obj_id)) {
     params->hit_on_ghost = true;
   }
 
+  // 在main缓存中查找
   obj = params->main_cache->find(params->main_cache, req, update_cache);
 
+  // 检查是否命中过去淘汰的对象
   if (params->fifo_eviction->find(params->fifo_eviction, req, false) != NULL) {
     params->fifo_eviction->remove(params->fifo_eviction, req->obj_id);
     params->fifo_eviction_hit++;
@@ -340,30 +364,29 @@ static cache_obj_t *S3FIFOd_find(cache_t *cache, const request_t *req,
 }
 
 /**
- * @brief insert an object into the cache,
- * update the hash table and cache metadata
- * this function assumes the cache has enough space
- * eviction should be
- * performed before calling this function
+ * @brief 向缓存中插入对象
+ * 更新哈希表和缓存元数据
+ * 此函数假设缓存有足够空间，应在调用前执行淘汰
  *
- * @param cache
- * @param req
- * @return the inserted object
+ * @param cache 缓存实例
+ * @param req 请求对象
+ * @return 插入的对象指针
  */
 static cache_obj_t *S3FIFOd_insert(cache_t *cache, const request_t *req) {
   S3FIFOd_params_t *params = (S3FIFOd_params_t *)cache->eviction_params;
   cache_obj_t *obj = NULL;
 
   if (params->hit_on_ghost) {
-    /* insert into the ARC */
+    /* 如果命中ghost，直接插入main缓存 */
     params->hit_on_ghost = false;
     params->main_cache->get(params->main_cache, req);
     obj = params->main_cache->find(params->main_cache, req, false);
   } else {
-    /* insert into the fifo */
+    /* 否则插入FIFO缓存 */
     obj = params->fifo->insert(params->fifo, req);
   }
 
+  // 确保频率初始化为0
   assert(obj->misc.freq == 0);
 
 #if defined(TRACK_EVICTION_V_AGE)
@@ -374,14 +397,12 @@ static cache_obj_t *S3FIFOd_insert(cache_t *cache, const request_t *req) {
 }
 
 /**
- * @brief find the object to be evicted
- * this function does not actually evict the object or update metadata
- * not all eviction algorithms support this function
- * because the eviction logic cannot be decoupled from finding eviction
- * candidate, so use assert(false) if you cannot support this function
+ * @brief 查找要淘汰的对象
+ * 此函数不实际淘汰对象或更新元数据
+ * S3FIFOd不支持此功能，因为淘汰逻辑不能与查找候选对象分离
  *
- * @param cache the cache
- * @return the object to be evicted
+ * @param cache 缓存实例
+ * @return 要淘汰的对象指针
  */
 static cache_obj_t *S3FIFOd_to_evict(cache_t *cache, const request_t *req) {
   assert(false);
@@ -389,13 +410,12 @@ static cache_obj_t *S3FIFOd_to_evict(cache_t *cache, const request_t *req) {
 }
 
 /**
- * @brief evict an object from the cache
- * it needs to call cache_evict_base before returning
- * which updates some metadata such as n_obj, occupied size, and hash table
+ * @brief 从缓存中淘汰对象
+ * 在返回前需要调用cache_evict_base
+ * 以更新一些元数据如n_obj、占用大小和哈希表
  *
- * @param cache
- * @param req not used
- * @param evicted_obj if not NULL, return the evicted object to caller
+ * @param cache 缓存实例
+ * @param req 请求对象，此处未使用
  */
 static void S3FIFOd_evict(cache_t *cache, const request_t *req) {
   S3FIFOd_params_t *params = (S3FIFOd_params_t *)cache->eviction_params;
@@ -405,12 +425,13 @@ static void S3FIFOd_evict(cache_t *cache, const request_t *req) {
   cache_t *main = params->main_cache;
 
   if (fifo->get_occupied_byte(fifo) == 0) {
+    // 如果FIFO为空，从main缓存淘汰
     assert(main->get_occupied_byte(main) <= cache->cache_size);
-    // evict from main cache
     cache_obj_t *obj = main->to_evict(main, req);
 #if defined(TRACK_EVICTION_V_AGE)
     record_eviction_age(cache, obj, CURR_TIME(cache, req) - obj->create_time);
 #endif
+    // 记录被淘汰的对象
     copy_cache_obj_to_request(params->req_local, obj);
     params->main_cache_eviction->get(params->main_cache_eviction,
                                      params->req_local);
@@ -418,23 +439,23 @@ static void S3FIFOd_evict(cache_t *cache, const request_t *req) {
     return;
   }
 
-  // evict from FIFO
+  // 从FIFO淘汰
   cache_obj_t *obj = fifo->to_evict(fifo, req);
   assert(obj != NULL);
-  // need to copy the object before it is evicted
+  // 在淘汰前复制对象
   copy_cache_obj_to_request(params->req_local, obj);
 
 #if defined(TRACK_EVICTION_V_AGE)
   if (obj->misc.freq >= params->move_to_main_threshold) {
-    // promote to main cache
+    // 如果访问频率达到阈值，提升到main缓存
     cache_obj_t *new_obj = main->insert(main, params->req_local);
     new_obj->create_time = obj->create_time;
-    // evict from fifo, must be after copy eviction age
+    // 从FIFO中移除
     bool removed = fifo->remove(fifo, params->req_local->obj_id);
     assert(removed);
 
+    // 如果main缓存超过大小限制，淘汰对象
     while (main->get_occupied_byte(main) > main->cache_size) {
-      // evict from main cache
       obj = main->to_evict(main, req);
       copy_cache_obj_to_request(params->req_local, obj);
       params->main_cache_eviction->get(params->main_cache_eviction,
@@ -442,27 +463,28 @@ static void S3FIFOd_evict(cache_t *cache, const request_t *req) {
       main->evict(main, req);
     }
   } else {
-    // evict from fifo, must be after copy eviction age
+    // 从FIFO移除
     bool removed = fifo->remove(fifo, params->req_local->obj_id);
     assert(removed);
 
+    // 记录淘汰时间
     record_eviction_age(cache, obj, CURR_TIME(cache, req) - obj->create_time);
-    // insert to ghost
+    // 插入ghost列表
     ghost->get(ghost, params->req_local);
     params->fifo_eviction->get(params->fifo_eviction, params->req_local);
   }
 
 #else
-  // evict from fifo
+  // 从FIFO移除
   bool removed = fifo->remove(fifo, params->req_local->obj_id);
   assert(removed);
 
   if (obj->misc.freq >= params->move_to_main_threshold) {
-    // promote to main cache
+    // 如果访问频率达到阈值，提升到main缓存
     main->insert(main, params->req_local);
 
+    // 如果main缓存超过大小限制，淘汰对象
     while (main->get_occupied_byte(main) > main->cache_size) {
-      // evict from main cache
       obj = main->to_evict(main, req);
       copy_cache_obj_to_request(params->req_local, obj);
       params->main_cache_eviction->get(params->main_cache_eviction,
@@ -470,7 +492,7 @@ static void S3FIFOd_evict(cache_t *cache, const request_t *req) {
       main->evict(main, req);
     }
   } else {
-    // insert to ghost
+    // 插入ghost列表
     ghost->get(ghost, params->req_local);
     params->fifo_eviction->get(params->fifo_eviction, params->req_local);
   }
@@ -478,21 +500,21 @@ static void S3FIFOd_evict(cache_t *cache, const request_t *req) {
 }
 
 /**
- * @brief remove an object from the cache
- * this is different from cache_evict because it is used to for user trigger
- * remove, and eviction is used by the cache to make space for new objects
+ * @brief 从缓存中删除指定对象
+ * 这与cache_evict不同，它用于用户触发的删除
+ * 而不是缓存为新对象腾出空间的淘汰
  *
- * it needs to call cache_remove_obj_base before returning
- * which updates some metadata such as n_obj, occupied size, and hash table
+ * 在返回前需要调用cache_remove_obj_base
+ * 以更新一些元数据如n_obj、占用大小和哈希表
  *
- * @param cache
- * @param obj_id
- * @return true if the object is removed, false if the object is not in the
- * cache
+ * @param cache 缓存实例
+ * @param obj_id 要删除的对象ID
+ * @return 如果对象被删除返回true，如果对象不在缓存中返回false
  */
 static bool S3FIFOd_remove(cache_t *cache, const obj_id_t obj_id) {
   S3FIFOd_params_t *params = (S3FIFOd_params_t *)cache->eviction_params;
   bool removed = false;
+  // 尝试从各个缓存区域删除对象
   removed = removed || params->fifo->remove(params->fifo, obj_id);
   removed = removed || params->fifo_ghost->remove(params->fifo_ghost, obj_id);
   removed = removed || params->main_cache->remove(params->main_cache, obj_id);
@@ -500,18 +522,37 @@ static bool S3FIFOd_remove(cache_t *cache, const obj_id_t obj_id) {
   return removed;
 }
 
+/**
+ * @brief 获取缓存当前占用的字节数
+ * 
+ * @param cache 缓存实例
+ * @return 占用的字节数
+ */
 static inline int64_t S3FIFOd_get_occupied_byte(const cache_t *cache) {
   S3FIFOd_params_t *params = (S3FIFOd_params_t *)cache->eviction_params;
   return params->fifo->get_occupied_byte(params->fifo) +
          params->main_cache->get_occupied_byte(params->main_cache);
 }
 
+/**
+ * @brief 获取缓存中的对象数量
+ * 
+ * @param cache 缓存实例
+ * @return 对象数量
+ */
 static inline int64_t S3FIFOd_get_n_obj(const cache_t *cache) {
   S3FIFOd_params_t *params = (S3FIFOd_params_t *)cache->eviction_params;
   return params->fifo->get_n_obj(params->fifo) +
          params->main_cache->get_n_obj(params->main_cache);
 }
 
+/**
+ * @brief 检查是否可以将对象插入缓存
+ * 
+ * @param cache 缓存实例
+ * @param req 请求对象
+ * @return 如果可以插入返回true，否则返回false
+ */
 static inline bool S3FIFOd_can_insert(cache_t *cache, const request_t *req) {
   S3FIFOd_params_t *params = (S3FIFOd_params_t *)cache->eviction_params;
 
@@ -523,6 +564,13 @@ static inline bool S3FIFOd_can_insert(cache_t *cache, const request_t *req) {
 // ****                parameter set up functions                     ****
 // ****                                                               ****
 // ***********************************************************************
+
+/**
+ * @brief 获取当前S3FIFOd参数的字符串表示
+ * 
+ * @param params S3FIFOd参数结构体
+ * @return 参数字符串
+ */
 static const char *S3FIFOd_current_params(S3FIFOd_params_t *params) {
   static __thread char params_str[128];
   snprintf(params_str, 128, "fifo-size-ratio=%.4lf,main-cache=%s\n",
@@ -530,6 +578,12 @@ static const char *S3FIFOd_current_params(S3FIFOd_params_t *params) {
   return params_str;
 }
 
+/**
+ * @brief 解析缓存特定参数
+ * 
+ * @param cache 缓存实例
+ * @param cache_specific_params 特定参数字符串
+ */
 static void S3FIFOd_parse_params(cache_t *cache,
                                 const char *cache_specific_params) {
   S3FIFOd_params_t *params = (S3FIFOd_params_t *)(cache->eviction_params);
@@ -539,12 +593,11 @@ static void S3FIFOd_parse_params(cache_t *cache,
   // char *end;
 
   while (params_str != NULL && params_str[0] != '\0') {
-    /* different parameters are separated by comma,
-     * key and value are separated by = */
+    /* 不同参数由逗号分隔，键和值由等号分隔 */
     char *key = strsep((char **)&params_str, "=");
     char *value = strsep((char **)&params_str, ",");
 
-    // skip the white space
+    // 跳过空格
     while (params_str != NULL && *params_str == ' ') {
       params_str++;
     }

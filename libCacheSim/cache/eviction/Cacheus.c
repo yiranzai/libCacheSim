@@ -1,4 +1,22 @@
-/* Cacheus: FAST'21 */
+//
+//  Cacheus 缓存替换算法实现
+//  发表于FAST'21会议的自适应缓存替换算法
+//
+//  Cacheus算法特点：
+//  - 结合LRU(最近最少使用)和LFU(最不经常使用)两种策略
+//  - 使用机器学习方法动态调整LRU和LFU的权重
+//  - 维护两个ghost列表记录从LRU和LFU中淘汰的对象
+//  - 通过学习率(learning rate)参数控制权重调整速度
+//  - 根据缓存命中情况自适应调整策略，提高命中率
+//
+//  实现方式：
+//  - 使用SR_LRU实现LRU策略
+//  - 使用CR_LFU实现LFU策略
+//  - 根据ghost列表的命中情况调整LRU和LFU的权重
+//  - 定期更新学习率，适应访问模式的变化
+//
+//  Cacheus: FAST'21
+//
 
 #include "../../include/libCacheSim/evictionAlgo/Cacheus.h"
 

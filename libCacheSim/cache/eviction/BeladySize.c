@@ -1,11 +1,22 @@
 //
+//  BeladySize 缓存替换算法实现
+//  Belady算法的变种，考虑对象大小因素
+//
+//  BeladySize算法特点：
+//  - 基于Belady(MIN)算法，但考虑对象大小
+//  - 采样多个对象，比较它们的重用距离(reuse_distance)与大小(size)的乘积
+//  - 淘汰乘积值最大的对象，即优先淘汰大尺寸且长时间不会被再次访问的对象
+//  - 在处理不同大小的对象时比原始Belady算法更有效
+//  - 通过参数n-sample控制采样数量，默认为128
+//
+//  实现方式：
+//  - 随机采样n个对象
+//  - 计算每个对象的重用距离与大小的乘积
+//  - 选择乘积最大的对象进行淘汰
+//
 //  BeladySize.c
 //  libCacheSim
 //
-//  sample object and compare reuse_distance * size, then evict the greatest one
-//
-//
-/* todo: change to BeladySize */
 
 #include "../../dataStructure/hashtable/hashtable.h"
 #include "../../include/libCacheSim/evictionAlgo.h"

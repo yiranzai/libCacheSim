@@ -7,6 +7,26 @@
 // 
 
 
+//
+//  CAR (Clock with Adaptive Replacement) 缓存替换算法实现
+//  结合了CLOCK和ARC算法特点的自适应缓存替换策略
+//
+//  CAR算法特点：
+//  - 结合了CLOCK的低开销和ARC的自适应性
+//  - 使用四个列表：T1、B1、T2、B2
+//    * T1：存储最近一次访问的页面
+//    * T2：存储最近多次访问的页面
+//    * B1：T1的ghost列表，记录从T1淘汰的页面
+//    * B2：T2的ghost列表，记录从T2淘汰的页面
+//  - 使用时钟指针机制代替LRU链表，降低开销
+//  - 动态调整T1和T2的大小，适应不同的访问模式
+//  - 平衡对频率和最近性的考虑
+//
+//  实现方式：
+//  - 使用环形链表和时钟指针实现各个列表
+//  - 根据ghost列表的命中情况调整T1和T2的目标大小
+//  - 使用引用位(reference bit)决定是否淘汰对象
+//
 #include "../../dataStructure/hashtable/hashtable.h"
 #include "../../include/libCacheSim/evictionAlgo.h"
 
